@@ -1,10 +1,11 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import axios from "axios";
+import express from "express";
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -473,5 +474,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+const app = express();
+app.use(express.json());
+
+// Optional: simple shared secret to prevent unauthorized access
+const API_KEY = process.env.MCP_API_KEY;
+
+app.use((req, res, next) => {
+  if (API_KEY && req.headers["x-api-key"] !== API_KEY) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
+});
+
+app.post("/mcp", async (req, res) => {
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+  await server.connect(transport);
+  await transport.handleRequest(req, res, req.body);
+});
+
+app.get("/health", (_req, res) => res.json({ status: "ok" }));
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.error(`Mautic MCP server listening on port ${PORT}`);
+});
