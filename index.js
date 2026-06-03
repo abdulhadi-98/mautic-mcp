@@ -500,6 +500,16 @@ app.use((req, _res, next) => {
 });
 
 // ---------------------------------------------------------------------------
+// oauth-protected-resource — tells claude.ai which auth server to use
+// ---------------------------------------------------------------------------
+app.get("/.well-known/oauth-protected-resource", (_req, res) => {
+  res.json({
+    resource: SERVER_URL,
+    authorization_servers: [SERVER_URL],
+  });
+});
+
+// ---------------------------------------------------------------------------
 // OAuth2 discovery — claude.ai fetches this to know where to send users
 // ---------------------------------------------------------------------------
 app.get("/.well-known/oauth-authorization-server", (req, res) => {
@@ -751,15 +761,34 @@ function requireBearer(req, res, next) {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
   if (!token || !validTokens.has(token)) {
+    res.set(
+      "WWW-Authenticate",
+      `Bearer realm="${SERVER_URL}", resource_metadata="${SERVER_URL}/.well-known/oauth-protected-resource"`
+    );
     return res.status(401).json({ error: "Unauthorized" });
   }
   next();
 }
 
+// MCP endpoint at root — this is where claude.ai POSTs
+app.post("/", requireBearer, async (req, res) => {
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+  await server.connect(transport);
+  await transport.handleRequest(req, res, req.body);
+});
+
+// Keep /mcp as well for Claude Desktop clients
 app.post("/mcp", requireBearer, async (req, res) => {
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   await server.connect(transport);
   await transport.handleRequest(req, res, req.body);
+});
+
+// claude.ai sends GET / for SSE stream after POST /
+app.get("/", requireBearer, async (req, res) => {
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+  await server.connect(transport);
+  await transport.handleRequest(req, res);
 });
 
 app.get("/health", (_req, res) => res.json({ status: "ok" }));
