@@ -494,10 +494,16 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+app.use((req, _res, next) => {
+  console.error(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  next();
+});
+
 // ---------------------------------------------------------------------------
 // OAuth2 discovery — claude.ai fetches this to know where to send users
 // ---------------------------------------------------------------------------
-app.get("/.well-known/oauth-authorization-server", (_req, res) => {
+app.get("/.well-known/oauth-authorization-server", (req, res) => {
+  console.error("[discovery] requested by:", req.headers["user-agent"]);
   res.json({
     issuer: SERVER_URL,
     authorization_endpoint: `${SERVER_URL}/oauth/authorize`,
@@ -527,6 +533,8 @@ app.get("/.well-known/openid-configuration", (_req, res) => {
 // We accept any client and echo back a client_id so the flow can continue
 // ---------------------------------------------------------------------------
 app.post("/oauth/register", (req, res) => {
+  console.error("[register] headers:", JSON.stringify(req.headers));
+  console.error("[register] body:", JSON.stringify(req.body));
   const { client_name, redirect_uris, grant_types, response_types } = req.body;
   const clientId = crypto.randomBytes(16).toString("hex");
   res.status(201).json({
