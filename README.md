@@ -130,6 +130,41 @@ Restart Claude Desktop. You'll see the Mautic tools appear in the toolbar (hamme
 
 ---
 
+## Connecting from claude.ai (Web)
+
+The server implements OAuth2 so it works directly from [claude.ai](https://claude.ai) in the browser — no desktop app needed.
+
+### Extra environment variable required
+
+Add `SERVER_URL` to your deployment environment (the public HTTPS URL of your server, no trailing slash):
+
+```env
+SERVER_URL=https://mcp.yourdomain.com
+```
+
+### Connect on claude.ai
+
+1. Go to **claude.ai → Settings → Integrations → Add Integration**
+2. Enter your server URL: `https://mcp.yourdomain.com`
+3. Claude will redirect you to a sign-in page — enter your `MCP_API_KEY`
+4. You'll be redirected back to Claude, connected and ready
+
+Every team member goes through the same flow with the same API key. The server issues each browser session its own bearer token after the key is verified.
+
+### How the OAuth flow works
+
+```
+claude.ai → GET  /.well-known/oauth-authorization-server  (discovery)
+         → GET  /oauth/authorize                          (login page)
+         → POST /oauth/authorize  (submit API key)        (issues auth code)
+         → POST /oauth/token      (exchange code)         (issues bearer token)
+         → POST /mcp              (all tool calls)        (requires bearer token)
+```
+
+No database is needed — auth codes expire in 5 minutes, bearer tokens are held in memory. Restarting the server invalidates all tokens (users re-authenticate once).
+
+---
+
 ## Usage Examples
 
 Once connected, try these prompts in Claude:

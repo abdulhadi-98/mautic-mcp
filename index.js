@@ -6,8 +6,24 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import axios from "axios";
 import express from "express";
+import crypto from "crypto";
 import dotenv from "dotenv";
 dotenv.config();
+
+// ---------------------------------------------------------------------------
+// OAuth2 state — in-memory (single shared API key model, no DB needed)
+// ---------------------------------------------------------------------------
+const MCP_API_KEY = process.env.MCP_API_KEY;
+const SERVER_URL = process.env.SERVER_URL; // e.g. https://mcp.yourdomain.com
+
+// Short-lived auth codes: code -> { redirectUri, expiresAt }
+const authCodes = new Map();
+// Issued bearer tokens: token -> true
+const validTokens = new Set();
+
+function generateToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
 
 const mautic = axios.create({
   baseURL: `${process.env.MAUTIC_URL}/api`,
@@ -476,18 +492,206 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// Optional: simple shared secret to prevent unauthorized access
-const API_KEY = process.env.MCP_API_KEY;
+// ---------------------------------------------------------------------------
+// OAuth2 discovery — claude.ai fetches this to know where to send users
+// ---------------------------------------------------------------------------
+app.get("/.well-known/oauth-authorization-server", (_req, res) => {
+  res.json({
+    issuer: SERVER_URL,
+    authorization_endpoint: `${SERVER_URL}/oauth/authorize`,
+    token_endpoint: `${SERVER_URL}/oauth/token`,
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code"],
+    code_challenge_methods_supported: [],
+  });
+});
 
-app.use((req, res, next) => {
-  if (API_KEY && req.headers["x-api-key"] !== API_KEY) {
+// ---------------------------------------------------------------------------
+// Authorization endpoint — user enters the shared API key here
+// claude.ai redirects here; we show a simple HTML form
+// ---------------------------------------------------------------------------
+app.get("/oauth/authorize", (req, res) => {
+  const { redirect_uri, state, client_id } = req.query;
+  if (!redirect_uri) return res.status(400).send("Missing redirect_uri");
+
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mautic MCP — Sign In</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f5f5f5;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+      padding: 40px;
+      width: 100%;
+      max-width: 400px;
+    }
+    h1 { font-size: 1.4rem; margin-bottom: 6px; color: #111; }
+    p  { font-size: 0.9rem; color: #666; margin-bottom: 28px; }
+    label { display: block; font-size: 0.85rem; font-weight: 600; color: #333; margin-bottom: 6px; }
+    input[type=password] {
+      width: 100%;
+      padding: 10px 14px;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      outline: none;
+      transition: border 0.2s;
+    }
+    input[type=password]:focus { border-color: #555; }
+    button {
+      margin-top: 18px;
+      width: 100%;
+      padding: 11px;
+      background: #111;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button:hover { background: #333; }
+    .error { color: #c0392b; font-size: 0.85rem; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Mautic MCP</h1>
+    <p>Enter your API key to connect Claude to Mautic.</p>
+    <form method="POST" action="/oauth/authorize">
+      <input type="hidden" name="redirect_uri" value="${redirect_uri}" />
+      <input type="hidden" name="state" value="${state || ""}" />
+      <input type="hidden" name="client_id" value="${client_id || ""}" />
+      <label for="apikey">API Key</label>
+      <input type="password" id="apikey" name="apikey" placeholder="Enter your API key" required autofocus />
+      <button type="submit">Connect</button>
+    </form>
+  </div>
+</body>
+</html>`);
+});
+
+app.post("/oauth/authorize", (req, res) => {
+  const { redirect_uri, state, apikey } = req.body;
+  if (!redirect_uri) return res.status(400).send("Missing redirect_uri");
+
+  if (!MCP_API_KEY || apikey !== MCP_API_KEY) {
+    return res.status(401).send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Mautic MCP — Sign In</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f5f5f5;
+      display: flex; align-items: center; justify-content: center; min-height: 100vh;
+    }
+    .card {
+      background: #fff; border-radius: 12px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+      padding: 40px; width: 100%; max-width: 400px;
+    }
+    h1 { font-size: 1.4rem; margin-bottom: 6px; color: #111; }
+    p  { font-size: 0.9rem; color: #666; margin-bottom: 28px; }
+    label { display: block; font-size: 0.85rem; font-weight: 600; color: #333; margin-bottom: 6px; }
+    input[type=password] {
+      width: 100%; padding: 10px 14px; border: 1px solid #ddd;
+      border-radius: 8px; font-size: 0.95rem; outline: none;
+    }
+    input[type=password]:focus { border-color: #555; }
+    button {
+      margin-top: 18px; width: 100%; padding: 11px;
+      background: #111; color: #fff; border: none;
+      border-radius: 8px; font-size: 0.95rem; cursor: pointer;
+    }
+    button:hover { background: #333; }
+    .error { color: #c0392b; font-size: 0.85rem; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Mautic MCP</h1>
+    <p>Enter your API key to connect Claude to Mautic.</p>
+    <form method="POST" action="/oauth/authorize">
+      <input type="hidden" name="redirect_uri" value="${redirect_uri}" />
+      <input type="hidden" name="state" value="${state || ""}" />
+      <label for="apikey">API Key</label>
+      <input type="password" id="apikey" name="apikey" placeholder="Enter your API key" required autofocus />
+      <button type="submit">Connect</button>
+    </form>
+    <p class="error">Invalid API key. Please try again.</p>
+  </div>
+</body>
+</html>`);
+  }
+
+  // Valid key — issue a short-lived auth code and redirect back
+  const code = generateToken();
+  authCodes.set(code, { redirectUri: redirect_uri, expiresAt: Date.now() + 5 * 60 * 1000 });
+
+  const redirectUrl = new URL(redirect_uri);
+  redirectUrl.searchParams.set("code", code);
+  if (state) redirectUrl.searchParams.set("state", state);
+  res.redirect(redirectUrl.toString());
+});
+
+// ---------------------------------------------------------------------------
+// Token endpoint — exchanges auth code for bearer token
+// ---------------------------------------------------------------------------
+app.post("/oauth/token", (req, res) => {
+  const { code, grant_type } = req.body;
+
+  if (grant_type !== "authorization_code") {
+    return res.status(400).json({ error: "unsupported_grant_type" });
+  }
+
+  const entry = authCodes.get(code);
+  if (!entry || Date.now() > entry.expiresAt) {
+    authCodes.delete(code);
+    return res.status(400).json({ error: "invalid_grant" });
+  }
+
+  authCodes.delete(code);
+  const token = generateToken();
+  validTokens.add(token);
+
+  res.json({
+    access_token: token,
+    token_type: "Bearer",
+    expires_in: 3600 * 24 * 30, // 30 days
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MCP endpoint — requires valid bearer token
+// ---------------------------------------------------------------------------
+function requireBearer(req, res, next) {
+  const auth = req.headers.authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!token || !validTokens.has(token)) {
     return res.status(401).json({ error: "Unauthorized" });
   }
   next();
-});
+}
 
-app.post("/mcp", async (req, res) => {
+app.post("/mcp", requireBearer, async (req, res) => {
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   await server.connect(transport);
   await transport.handleRequest(req, res, req.body);
