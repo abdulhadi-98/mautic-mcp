@@ -16,7 +16,7 @@ dotenv.config();
 const MCP_API_KEY = process.env.MCP_API_KEY;
 const SERVER_URL = process.env.SERVER_URL; // e.g. https://mcp.yourdomain.com
 
-// Short-lived auth codes: code -> { redirectUri, expiresAt }
+// Short-lived auth codes: code -> { redirectUri, expiresAt, codeChallenge, codeChallengeMethod }
 const authCodes = new Map();
 // Issued bearer tokens: token -> true
 const validTokens = new Set();
@@ -502,9 +502,40 @@ app.get("/.well-known/oauth-authorization-server", (_req, res) => {
     issuer: SERVER_URL,
     authorization_endpoint: `${SERVER_URL}/oauth/authorize`,
     token_endpoint: `${SERVER_URL}/oauth/token`,
+    registration_endpoint: `${SERVER_URL}/oauth/register`,
     response_types_supported: ["code"],
     grant_types_supported: ["authorization_code"],
-    code_challenge_methods_supported: [],
+    code_challenge_methods_supported: ["S256"],
+  });
+});
+
+// Also expose at the standard OIDC path some clients check
+app.get("/.well-known/openid-configuration", (_req, res) => {
+  res.json({
+    issuer: SERVER_URL,
+    authorization_endpoint: `${SERVER_URL}/oauth/authorize`,
+    token_endpoint: `${SERVER_URL}/oauth/token`,
+    registration_endpoint: `${SERVER_URL}/oauth/register`,
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code"],
+    code_challenge_methods_supported: ["S256"],
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dynamic Client Registration (RFC 7591) — claude.ai POSTs here first
+// We accept any client and echo back a client_id so the flow can continue
+// ---------------------------------------------------------------------------
+app.post("/oauth/register", (req, res) => {
+  const { client_name, redirect_uris, grant_types, response_types } = req.body;
+  const clientId = crypto.randomBytes(16).toString("hex");
+  res.status(201).json({
+    client_id: clientId,
+    client_name: client_name || "mcp-client",
+    redirect_uris: redirect_uris || [],
+    grant_types: grant_types || ["authorization_code"],
+    response_types: response_types || ["code"],
+    token_endpoint_auth_method: "none",
   });
 });
 
@@ -513,7 +544,7 @@ app.get("/.well-known/oauth-authorization-server", (_req, res) => {
 // claude.ai redirects here; we show a simple HTML form
 // ---------------------------------------------------------------------------
 app.get("/oauth/authorize", (req, res) => {
-  const { redirect_uri, state, client_id } = req.query;
+  const { redirect_uri, state, client_id, code_challenge, code_challenge_method } = req.query;
   if (!redirect_uri) return res.status(400).send("Missing redirect_uri");
 
   res.send(`<!DOCTYPE html>
@@ -577,6 +608,8 @@ app.get("/oauth/authorize", (req, res) => {
       <input type="hidden" name="redirect_uri" value="${redirect_uri}" />
       <input type="hidden" name="state" value="${state || ""}" />
       <input type="hidden" name="client_id" value="${client_id || ""}" />
+      <input type="hidden" name="code_challenge" value="${code_challenge || ""}" />
+      <input type="hidden" name="code_challenge_method" value="${code_challenge_method || ""}" />
       <label for="apikey">API Key</label>
       <input type="password" id="apikey" name="apikey" placeholder="Enter your API key" required autofocus />
       <button type="submit">Connect</button>
@@ -587,7 +620,7 @@ app.get("/oauth/authorize", (req, res) => {
 });
 
 app.post("/oauth/authorize", (req, res) => {
-  const { redirect_uri, state, apikey } = req.body;
+  const { redirect_uri, state, apikey, code_challenge, code_challenge_method } = req.body;
   if (!redirect_uri) return res.status(400).send("Missing redirect_uri");
 
   if (!MCP_API_KEY || apikey !== MCP_API_KEY) {
@@ -644,7 +677,12 @@ app.post("/oauth/authorize", (req, res) => {
 
   // Valid key — issue a short-lived auth code and redirect back
   const code = generateToken();
-  authCodes.set(code, { redirectUri: redirect_uri, expiresAt: Date.now() + 5 * 60 * 1000 });
+  authCodes.set(code, {
+    redirectUri: redirect_uri,
+    expiresAt: Date.now() + 5 * 60 * 1000,
+    codeChallenge: code_challenge || null,
+    codeChallengeMethod: code_challenge_method || null,
+  });
 
   const redirectUrl = new URL(redirect_uri);
   redirectUrl.searchParams.set("code", code);
@@ -656,7 +694,7 @@ app.post("/oauth/authorize", (req, res) => {
 // Token endpoint — exchanges auth code for bearer token
 // ---------------------------------------------------------------------------
 app.post("/oauth/token", (req, res) => {
-  const { code, grant_type } = req.body;
+  const { code, grant_type, code_verifier } = req.body;
 
   if (grant_type !== "authorization_code") {
     return res.status(400).json({ error: "unsupported_grant_type" });
@@ -668,6 +706,25 @@ app.post("/oauth/token", (req, res) => {
     return res.status(400).json({ error: "invalid_grant" });
   }
 
+  // Verify PKCE if the authorization request included a code_challenge
+  if (entry.codeChallenge) {
+    if (!code_verifier) {
+      return res.status(400).json({ error: "invalid_grant", error_description: "code_verifier required" });
+    }
+    const method = entry.codeChallengeMethod || "S256";
+    if (method === "S256") {
+      const digest = crypto.createHash("sha256").update(code_verifier).digest();
+      const challenge = digest.toString("base64url");
+      if (challenge !== entry.codeChallenge) {
+        return res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed" });
+      }
+    } else if (method === "plain") {
+      if (code_verifier !== entry.codeChallenge) {
+        return res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed" });
+      }
+    }
+  }
+
   authCodes.delete(code);
   const token = generateToken();
   validTokens.add(token);
@@ -675,7 +732,7 @@ app.post("/oauth/token", (req, res) => {
   res.json({
     access_token: token,
     token_type: "Bearer",
-    expires_in: 3600 * 24 * 30, // 30 days
+    expires_in: 3600 * 24 * 30,
   });
 });
 
