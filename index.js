@@ -134,10 +134,11 @@ const mautic = axios.create({
   headers: { "Content-Type": "application/json" },
 });
 
-const server = new Server(
-  { name: "mautic-mcp", version: "1.0.0" },
-  { capabilities: { tools: {} } }
-);
+function createServer() {
+  const server = new Server(
+    { name: "mautic-mcp", version: "1.0.0" },
+    { capabilities: { tools: {} } }
+  );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
@@ -590,10 +591,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+  return server;
+}
+
 // ---------------------------------------------------------------------------
 // Express app — SDK handles all OAuth routes via mcpAuthRouter
 // ---------------------------------------------------------------------------
 const app = express();
+app.set("trust proxy", true);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -669,20 +674,23 @@ const bearerAuth = requireBearerAuth({
 // MCP at root — claude.ai posts here
 app.post("/", bearerAuth, async (req, res) => {
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  await server.connect(transport);
+  const s = createServer();
+  await s.connect(transport);
   await transport.handleRequest(req, res, req.body);
 });
 
 app.get("/", bearerAuth, async (req, res) => {
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  await server.connect(transport);
+  const s = createServer();
+  await s.connect(transport);
   await transport.handleRequest(req, res);
 });
 
 // /mcp for Claude Desktop clients
 app.post("/mcp", bearerAuth, async (req, res) => {
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  await server.connect(transport);
+  const s = createServer();
+  await s.connect(transport);
   await transport.handleRequest(req, res, req.body);
 });
 
