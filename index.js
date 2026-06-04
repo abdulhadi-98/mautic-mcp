@@ -598,7 +598,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // Express app — SDK handles all OAuth routes via mcpAuthRouter
 // ---------------------------------------------------------------------------
 const app = express();
-app.set("trust proxy", true);
+app.set("trust proxy", 1);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -613,6 +613,10 @@ app.use(mcpAuthRouter({
   issuerUrl: new URL(SERVER_URL),
   baseUrl: new URL(SERVER_URL),
   resourceName: "Mautic MCP",
+  authorizationOptions: { rateLimit: false },
+  clientRegistrationOptions: { rateLimit: false },
+  revocationOptions: { rateLimit: false },
+  tokenOptions: { rateLimit: false },
 }));
 
 // POST /oauth/confirm — user submits API key from the authorize page
