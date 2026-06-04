@@ -20,7 +20,18 @@ const SERVER_URL = process.env.SERVER_URL;
 // ---------------------------------------------------------------------------
 const issuedTokens = new Map(); // token -> { clientId, expiresAt }
 const authCodes   = new Map(); // code  -> { clientId, redirectUri, codeChallenge, expiresAt }
-const clients     = new Map(); // clientId -> client object
+const clients = new Map(); // clientId -> client object
+
+// Pre-register the static client ID so claude.ai can use it without dynamic registration
+const STATIC_CLIENT_ID = process.env.OAUTH_CLIENT_ID || "mautic-mcp-client";
+clients.set(STATIC_CLIENT_ID, {
+  client_id: STATIC_CLIENT_ID,
+  client_id_issued_at: Math.floor(Date.now() / 1000),
+  redirect_uris: ["https://claude.ai/api/mcp/auth_callback"],
+  grant_types: ["authorization_code"],
+  response_types: ["code"],
+  token_endpoint_auth_method: "none",
+});
 
 const oauthProvider = {
   clientsStore: {
